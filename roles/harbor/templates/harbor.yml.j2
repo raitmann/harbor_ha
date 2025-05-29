@@ -1,0 +1,103 @@
+# Configuration file of Harbor
+
+hostname: {{ harbor_hostname }}
+
+http:
+  port: 80
+
+https:
+  port: 443
+  certificate: {{ harbor_ssl_cert }}
+  private_key: {{ harbor_ssl_key }}
+
+external_url: https://{{ harbor_hostname }}
+
+harbor_admin_password: {{ harbor_admin_password }}
+
+# The default data volume
+data_volume: {{ harbor_data_volume }}
+
+# Trivy configuration
+trivy:
+  ignore_unfixed: false
+  skip_update: true
+  skip_java_db_update: true
+  offline_scan: true
+  security_check: vuln
+  insecure: false
+  timeout: 5m0s
+  debug_mode: false
+
+jobservice:
+  max_job_workers: 10
+  job_loggers:
+    - STD_OUTPUT
+    - FILE
+    # - DB
+  logger_sweeper_duration: 1
+
+notification:
+  webhook_job_max_retry: 3
+  webhook_job_http_client_timeout: 3
+
+log:
+  level: {{ log_level }}
+  local:
+    rotate_count: {{ log_local_rotate_count }}
+    rotate_size: {{ log_local_rotate_size }}
+    location: {{ log_local_location }}
+
+_version: {{ harbor_version }}
+
+external_database:
+  harbor:
+    host: {{ postgres_host }}
+    port:  {{ postgres_port }}
+    db_name:  {{ postgres_dbname }}
+    username: {{ postgres_username }}
+    password:  {{ postgres_password }}
+    ssl_mode: "disable"
+    max_idle_conns: 2 #100
+    max_open_conns: 0 #900
+
+external_redis:
+  host: "{{ redis_hosts | join(',') }}"
+  {% if redis_password %}
+  password: "{{ redis_password }}"
+  {% endif %}
+  {% if redis_sentinel_master %}
+  sentinel_master_set: "{{ redis_sentinel_master }}"
+  {% endif %}
+  registry_db_index: 1
+  jobservice_db_index: 2
+  trivy_db_index: 5
+  idle_timeout_seconds: 30
+  # harbor_db_index: 6
+  # cache_layer_db_index: 7
+
+# Global proxy
+proxy:
+  http_proxy:
+  https_proxy:
+  no_proxy:
+  components:
+    - core
+    - jobservice
+    - trivy
+
+metric:
+  enabled: false
+  port: 9090
+  path: /metrics
+
+# Enable purge _upload directories
+upload_purging:
+  enabled: true
+  age: 168h
+  interval: 24h
+  dryrun: false
+
+# Cache layer configurations
+cache:
+  enabled: false
+  expire_hours: 24

@@ -1,0 +1,227 @@
+---
+
+- name: Add Docker CE repo manually (for proxy environments)
+  copy:
+    dest: /etc/yum.repos.d/docker-ce.repo
+    content: |
+      [docker-ce-stable]
+      name=Docker CE Stable - $basearch
+      baseurl=https://download.docker.com/linux/centos/8/$basearch/stable
+      enabled=1
+      gpgcheck=1
+      gpgkey=https://download.docker.com/linux/centos/gpg
+    mode: '0644'
+
+- name: Install Docker and utilities
+  yum:
+    name:
+      - docker-ce
+      - docker-ce-cli
+      - docker-compose-plugin
+      - docker-buildx-plugin
+      - docker-ce-rootless-extras
+      - docker-scan-plugin
+      - jq
+      - cifs-utils
+    state: present
+    update_cache: yes
+
+- name: Start and enable Docker
+  systemd:
+    name: docker
+    state: started
+    enabled: yes
+
+- name: Create necessary directories
+  file:
+    path: "{{ item }}"
+    state: directory
+    mode: '0755'
+  loop:
+    - /opt/harbor
+    - /opt/exporter
+    - /var/log/harbor
+    - /mnt/data/ca_download
+    - /mnt/data/certs
+    - /mnt/data/trivy-adapter
+    - /mnt/data/registry
+    - /mnt/data/job_logs
+    - /mnt/data/secret
+
+##### SMB #####
+- name: Create smb credentials file
+  copy:
+    content: |
+      username={{ smb_username }}
+      password={{ smb_password }}
+    dest: /etc/smb-credentials
+    owner: root
+    group: root
+    mode: '0600'
+
+- name: Create mount point
+  file:
+    path: "{{ harbor_data_volume }}"
+    state: directory
+    mode: '0755'
+
+- name: Configure SMB mount
+  block:
+
+    - name: Mount SMB share
+      mount:
+        path: "{{ harbor_data_volume }}"
+        src: "{{ smb_share }}"
+        fstype: cifs
+        opts: "{{ smb_mount_options }}"
+        state: mounted
+
+    - name: Verify SMB mount
+      command: df -h "{{ harbor_data_volume }}"
+      register: smb_mount
+      changed_when: false
+
+  rescue:
+    - name: Check if SMB mount failed
+      fail:
+        msg: "Failed to mount SMB share"
+
+- name: Configure fstab with SMB share
+  lineinfile:
+    path: /etc/fstab
+    line: "{{ smb_share }} {{ harbor_data_volume }} cifs {{ smb_mount_options }} 0 0"
+    state: present
+
+#### Harbor ####
+- name: Copy Harbor offline package
+  copy:
+    src: "{{ harbor_offline_package }}"
+    dest: "/tmp/{{ harbor_offline_package }}"
+    mode: '0644'
+
+- name: Extract Harbor
+  unarchive:
+    src: "/tmp/{{ harbor_offline_package }}"
+    dest: "/opt"
+    remote_src: yes
+    creates: "/opt/harbor"
+
+- name: Prepare harbor.yml config file
+  template:
+    src: harbor.yml.j2
+    dest: "/opt/harbor/harbor.yml"
+    mode: "0640"
+
+- name: Install Harbor with Trivy
+  command: ./install.sh --with-trivy
+  args:
+    chdir: /opt/harbor
+  register: install_result
+  until: install_result.rc == 0
+  retries: 3
+  delay: 10
+
+- name: Configure Harbor startup on reboot
+  cron:
+    name: "Start Harbor on boot"
+    special_time: reboot
+    job: "docker compose -f /opt/harbor/docker-compose.yml up -d --force-recreate"
+    user: root
+
+#### Trivy ####
+
+- name: Stop Harbor
+  shell: docker compose -f /opt/harbor/docker-compose.yml down
+  args:
+    chdir: /opt/harbor
+
+- name: Deploy Trivy DB update script
+  template:
+    src: upload_trivy_db.sh.j2
+    dest: "/opt/harbor/upload_trivy_db.sh"
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Ensure Trivy directories exist
+  file:
+    path: "{{ item }}"
+    state: directory
+    owner: 10000
+    group: 10000
+  loop:
+    - /opt/harbor/common/db
+    - /opt/harbor/common/java-db
+
+- name: Initialize Trivy DB (first run)
+  command: /opt/harbor/upload_trivy_db.sh
+  when: trivy_initial_load | default(true)
+
+- name: Schedule Trivy DB updates
+  cron:
+    name: "Update Trivy DB"
+    job: "/opt/harbor/upload_trivy_db.sh >> /var/log/harbor/trivy-update.log 2>&1"
+    user: root
+    hour: "12"
+    minute: "15"
+    weekday: "*"
+
+- name: Patch docker-compose.yml to add Trivy volumes
+  blockinfile:
+    path: /opt/harbor/docker-compose.yml
+    marker: "# {mark} ANSIBLE MANAGED BLOCK: trivy.extra_volumes"
+    insertafter: '^\s{4}volumes:'
+    block: |
+        - type: bind
+          source: /opt/harbor/common/db
+          target: /home/scanner/.cache/trivy/db
+        - type: bind
+          source: /opt/harbor/common/java-db
+          target: /home/scanner/.cache/trivy/java-db
+  # when: lookup('file', '/opt/harbor/docker-compose.yml') is search('trivy-adapter:')
+  when: ansible_facts['distribution'] is defined and lookup('ansible.builtin.file', '/opt/harbor/docker-compose.yml', errors='ignore') is search('trivy-adapter:')
+
+- name: Verify Harbor installation
+  uri:
+    url: "https://{{ harbor_hostname }}/api/v2.0/systeminfo"
+    validate_certs: no
+    status_code: 200
+    timeout: 30
+  register: harbor_status
+  until: harbor_status.status == 200
+  retries: 5
+  delay: 10
+
+- name: Show Harbor status
+  debug:
+    msg: "Harbor successfully installed and accessible at https://{{ harbor_hostname }}"
+  when: harbor_status.status == 200
+
+- name: Deploy Node Exporter docker-compose file
+  copy:
+    dest: /opt/exporter/docker-compose.yml
+    mode: '0644'
+    content: |
+      version: '3.8'
+      services:
+        node-exporter:
+          image: prom/node-exporter:latest
+          container_name: node-exporter
+          restart: always
+          pid: "host"
+          network_mode: "host"
+          volumes:
+            - /proc:/host/proc:ro
+            - /sys:/host/sys:ro
+            - /:/rootfs:ro
+          command:
+            - '--path.procfs=/host/proc'
+            - '--path.sysfs=/host/sys'
+            - '--path.rootfs=/rootfs'
+
+- name: Ensure Node Exporter is always running
+  shell: docker compose up -d
+  args:
+    chdir: /opt/exporter
+  register: exporter_result
+  changed_when: "'Started' in exporter_result.stdout or 'Recreating' in exporter_result.stdout or 'Creating' in exporter_result.stdout"

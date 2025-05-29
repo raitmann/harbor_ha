@@ -1,0 +1,40 @@
+harbor_version: "v2.12.4"
+harbor_offline_package: "harbor-offline-installer-{{ harbor_version }}.tgz"
+harbor_hostname: "harbor.domain.com"
+harbor_admin_password: "your_admin_password"
+harbor_data_volume: "/mnt/data"
+
+# SSL configuration
+harbor_ssl_cert: "/etc/harbor/ssl/cert.pem"
+harbor_ssl_key: "/etc/harbor/ssl/key.pem"
+
+# Logging config
+log_level: "info"
+log_local_rotate_count: 50
+log_local_rotate_size: "200M"
+log_local_location: "/var/log/harbor"
+
+# Database configuration
+postgres_host: "postgres-primary.example.com"
+postgres_port: 5432
+postgres_dbname: "registry"
+postgres_username: "harbor"
+postgres_password: "securepassword"
+
+# Redis configuration
+redis_hosts:
+  - "redis1.example.com:6379"
+  # - "redis2.example.com:6379"
+  # - "redis3.example.com:6379"
+# redis_password: "redispassword"
+# redis_sentinel_master: "mymaster"
+
+# SMB configuration
+smb_share: "/path/to/harbor"
+smb_username: "smbuser"
+smb_password: "smbpassword"
+smb_mount_options: "credentials=/etc/smb-credentials,uid=10000,gid=10000,file_mode=0755,dir_mode=0755,vers=3.0"
+
+# Trivy configuration
+trivy_db_url: "https://proxy-nexus.com/repository/trivy/trivy.tar.gz"
+trivy_initial_load: true
